@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState, useCallback, useRef, useMemo, memo } from "react";
 import { useMiniKit } from "@coinbase/onchainkit/minikit";
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
+import { useAccount } from "wagmi";
+import { useSendCalls, useCallsStatus } from "wagmi/experimental";
+import { encodeFunctionData } from "viem";
 import { CHECK_IN_CONTRACT_ADDRESS, CHECK_IN_ABI } from "./contracts/checkIn";
 import styles from "./page.module.css";
 
@@ -244,21 +246,32 @@ export default function Home() {
   const lastClickRef = useRef<number>(0);
   const isProcessingRef = useRef<boolean>(false);
 
-  // Contract write hook
+  // Contract write hook with Paymaster support
   const { 
-    data: hash, 
-    writeContract, 
+    data: callsId, 
+    sendCalls, 
     isPending: isWritePending,
     error: writeError,
     reset: resetWrite
-  } = useWriteContract();
+  } = useSendCalls();
 
-  // Wait for transaction receipt
+  // Track calls status for confirmation
   const { 
-    isLoading: isConfirming, 
-    isSuccess: isConfirmed,
-    error: confirmError
-  } = useWaitForTransactionReceipt({ hash });
+    data: callsStatus,
+    isLoading: isConfirming,
+  } = useCallsStatus({
+    id: callsId as string,
+    query: {
+      enabled: !!callsId,
+      refetchInterval: (data) => 
+        data.state.data?.status === "CONFIRMED" ? false : 1000,
+    },
+  });
+
+  // Derive confirmation state from calls status
+  const isConfirmed = callsStatus?.status === "CONFIRMED";
+  const confirmError = null; // Errors are handled via writeError
+  const hash = callsStatus?.receipts?.[0]?.transactionHash;
 
   // Initialize MiniKit
   useEffect(() => {
@@ -386,12 +399,25 @@ export default function Home() {
     // Mark as processing
     isProcessingRef.current = true;
 
-    // Send the checkIn transaction
+    // Send the checkIn transaction with Paymaster (sponsored gas)
     try {
-      writeContract({
-        address: CHECK_IN_CONTRACT_ADDRESS,
+      const callData = encodeFunctionData({
         abi: CHECK_IN_ABI,
         functionName: "checkIn",
+      });
+
+      sendCalls({
+        calls: [
+          {
+            to: CHECK_IN_CONTRACT_ADDRESS,
+            data: callData,
+          },
+        ],
+        capabilities: {
+          paymasterService: {
+            url: `https://api.developer.coinbase.com/rpc/v1/base/${process.env.NEXT_PUBLIC_ONCHAINKIT_API_KEY}`,
+          },
+        },
       });
     } catch (e) {
       console.error("Write contract error:", e);
@@ -400,7 +426,7 @@ export default function Home() {
       setPendingAction(null);
       isProcessingRef.current = false;
     }
-  }, [isConnected, writeContract, resetWrite, calendarData]);
+  }, [isConnected, sendCalls, resetWrite, calendarData]);
 
   const handleNo = useCallback(() => handleButtonClick("no"), [handleButtonClick]);
   const handleYes = useCallback(() => handleButtonClick("yes"), [handleButtonClick]);
